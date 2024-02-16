@@ -1,65 +1,32 @@
 import { Hono } from "hono";
 import { poweredBy } from "hono/powered-by";
 import { logger } from "hono/logger";
-import { serveStatic } from "hono/bun";
-import { stream, streamText, streamSSE } from "hono/streaming";
+import { stream } from "hono/streaming";
 import { isValidObjectId } from "mongoose";
-import { jsxRenderer } from "hono/jsx-renderer";
 
-import Home from "./templates/home";
 import dbConnect from "./db/connect";
-import FavYoutubeVideosModel, {
-    IFavYoutubeVideosSchema,
-} from "./db/fav-youtube-videos.model";
-import Layout from "./templates/Layout";
-import Create from "./templates/Create";
-import View from "./templates/View";
+import FavYoutubeVideosModel from "./db/fav-youtube-videos.model";
 
 const app = new Hono();
 
 app.use(poweredBy());
 app.use(logger());
 
-// Serve Pubilc/Static Files
-app.use("/style.css", serveStatic({ path: "./public/style.css" }));
-// app.use("/favicon.ico", serveStatic({ path: "./public/favicon.ico" }));
-
 dbConnect()
     .then(() => {
-        // defining that default renderer is jsx with setting up global layout
-        app.all("/*", jsxRenderer(Layout));
-
         // Get List
         app.get("/", async (c) => {
             const documents = await FavYoutubeVideosModel.find();
 
-            return c.render(
-                <Home videoList={documents.map((d) => d.toObject())} />
+            return c.json(
+                documents.map((d) => d.toObject()),
+                200
             );
         });
 
-        // Create Form
-        app.get("/create", (c) => c.render(<Create />));
-
         // Create Document
-        app.post("/create", async (c) => {
-            const formData = await c.req.parseBody<
-                Partial<Record<keyof IFavYoutubeVideosSchema, string>>
-            >();
-            const formError: Partial<
-                Record<keyof IFavYoutubeVideosSchema, string>
-            > = {};
-
-            if (!formData.title) formError.title = "Title is required";
-
-            if (!formData.youtuberName)
-                formError.youtuberName = "youtuber's name is required";
-
-            if (!formData.description)
-                formError.description = "Description is required";
-
-            if (Object.keys(formError).length > 0)
-                return c.render(<Create formError={formError} />);
+        app.post("/", async (c) => {
+            const formData = await c.req.json();
 
             if (!formData.thumbnailUrl) delete formData.thumbnailUrl;
 
@@ -68,52 +35,101 @@ dbConnect()
             try {
                 const document = await favYoutubeVideosObj.save();
 
-                if (!document) throw new Error("Error Creating Document");
-
-                return c.redirect("/");
+                return c.json(document.toObject(), 201);
             } catch (error) {
-                return c.render(
-                    <Create formError={{ form: (error as any)?.message }} />
+                return c.json(
+                    (error as any)?.message || "Internal Server Error",
+                    500
                 );
             }
         });
 
         // View document by id
-        app.get("/d/:documentId", async (c) => {
+        app.get("/:documentId", async (c) => {
             const id = c.req.param("documentId");
 
-            if (!isValidObjectId(id)) return c.redirect("/");
+            if (!isValidObjectId(id)) return c.json("Invalid ID", 400);
 
             const document = await FavYoutubeVideosModel.findById(id);
 
-            if (!document) return c.redirect("/");
+            if (!document) return c.json("Document Not Found", 404);
 
-            return c.render(<View videoDetails={document.toObject()} />);
+            return c.json(document.toObject(), 200);
         });
 
-        app.get("/stream", (c) => {
-            return stream(c, async (stream) => {
-                const documents = await FavYoutubeVideosModel.find();
+        // View document description stream by id
+        app.get("/d/:documentId", async (c) => {
+            const id = c.req.param("documentId");
 
+            const document = await FavYoutubeVideosModel.findById(id);
+
+            if (!document) return c.json("Document Not Found", 404);
+
+            return stream(c, async (stream) => {
                 // Write a process to be executed when aborted.
                 stream.onAbort(() => {
                     console.log("Aborted!");
                 });
 
-                for (let i = 0; i < documents.length; i++) {
-                    const document = documents[i];
+                const wordSplit = document.description.split(" ");
 
-                    await stream.write(JSON.stringify(document));
-                    await stream.sleep(500);
+                for (let i = 0; i < wordSplit.length; i++) {
+                    const word = wordSplit[i];
+
+                    await stream.write(`${word} `);
+                    await stream.sleep(100);
                 }
-
-                // Write a Uint8Array.
-                // await stream.write(
-                //     new Uint8Array([0x48, 0x65, 0x6c, 0x6c, 0x6f])
-                // );
-                // Pipe a readable stream.
-                // await stream.pipe(anotherReadableStream);
             });
+        });
+
+        // Update Document
+        app.patch("/:documentId", async (c) => {
+            const id = c.req.param("documentId");
+
+            if (!isValidObjectId(id)) return c.json("Invalid ID", 400);
+
+            const document = await FavYoutubeVideosModel.findById(id);
+
+            if (!document) return c.json("Document Not Found", 404);
+
+            const formData = await c.req.json();
+
+            if (!formData.thumbnailUrl) delete formData.thumbnailUrl;
+
+            try {
+                const updatedDocument =
+                    await FavYoutubeVideosModel.findByIdAndUpdate(
+                        id,
+                        formData,
+                        {
+                            new: true,
+                        }
+                    );
+
+                return c.json(updatedDocument?.toObject(), 200);
+            } catch (error) {
+                return c.json(
+                    (error as any)?.message || "Internal Server Error",
+                    500
+                );
+            }
+        });
+
+        // Delete Document
+        app.delete("/:documentId", async (c) => {
+            const id = c.req.param("documentId");
+
+            try {
+                const deletedDocument =
+                    await FavYoutubeVideosModel.findByIdAndDelete(id);
+
+                return c.json(deletedDocument?.toObject(), 200);
+            } catch (error) {
+                return c.json(
+                    (error as any)?.message || "Internal Server Error",
+                    500
+                );
+            }
         });
     })
     .catch((err) => {
